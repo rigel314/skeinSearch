@@ -25,28 +25,55 @@ void search(uint8_t* rands, int* ans)
 	uint64_t hash[16];
 
 	int min = 1024;
+	// int len = BYpH;
+	// int offset = 0;
 
 	for(int i = 0; i < HpT; i++)
 	{
-		skeinhash1024x1024(rands+blockIdx.x*TpB*HpT*BYpH+threadIdx.x*HpT*BYpH+i*BYpH, BYpH, hash);
-		int c = 0;
-		for (int j = 0; j < Nw; j++)
-		{
-			uint64_t tmp = target[j] ^ hash[j];
-			for (int k = 0; k < 64; k++)
-			{
-				if(tmp & 1)
-					c++;
-				tmp >>= 1;
-			}
-		}
-		if(c < min)
-		{
-			min = c;
-		}
+		// for(int h = BYpH; h > minBYpH; h--)
+		// {
+		// 	for(int o = 0; h+o <= BYpH; o++)
+		// 	{
+				// skeinhash1024x1024(rands+blockIdx.x*TpB*HpT*BYpH+threadIdx.x*HpT*BYpH+i*BYpH + o, h, hash);
+				skeinhash1024x1024(rands+blockIdx.x*TpB*HpT*BYpH+threadIdx.x*HpT*BYpH+i*BYpH, BYpH, hash);
+				int c = 0;
+				for (int j = 0; j < Nw; j++)
+				{
+					uint64_t tmp = target[j] ^ hash[j];
+					for (int k = 0; k < 64; k++)
+					{
+						if(tmp & 1)
+							c++;
+						tmp >>= 1;
+					}
+				}
+				if(c < min)
+				{
+					min = c;
+					// len = h;
+					// offset = o;
+				}
+		// 	}
+		// }
 	}
 
-	ans[blockIdx.x*TpB+threadIdx.x] = min;
+	ans[blockIdx.x*TpB+threadIdx.x] = min; // | (len << 11) | (offset << 21);
+}
+
+__global__
+void findMin(int* array)
+{
+	int a = blockIdx.x*TpB+threadIdx.x;
+	int b = a+1;
+	int ctr = 0;
+
+	do
+	{
+		array[a] = min(array[a], array[b]);
+		if((a > ctr) & 1)
+			break;
+		b = 0;
+	} while(b < BLOCKS*TpB);
 }
 
 void printLog(char* msg);
@@ -110,6 +137,11 @@ int main()
 	int lowestI = -1;
 	for(int i = 0; i < BLOCKS*TpB; i++)
 	{
+		// if(answers[i] & (0x7FF) < min)
+		// {
+		// 	min = answers[i] & (0x7FF);
+		// 	lowestI = i;
+		// }
 		if(answers[i] < min)
 		{
 			min = answers[i];
@@ -120,6 +152,10 @@ int main()
 	uint8_t bestMatch[BYpH];
 	cudaMemcpy(&bestMatch, cuRands+lowestI*BYpH, BYpH, cudaMemcpyDeviceToHost); assert(cudaGetLastError() == cudaSuccess);
 	printfLog((char*)"best match(%d incorrect bits):", min);
+	// for(int i = ((answers[lowestI] & (0x7FE00000)) >> 21); i < ((answers[lowestI] & (0x1FF800)) >> 11); i++)
+	// {
+	// 	printf("%02x ", bestMatch[i]);
+	// }
 	for(int i = 0; i < BYpH; i++)
 	{
 		printf("%02x ", bestMatch[i]);
