@@ -20,4 +20,4 @@ clean:
 	-rm skeinsearch
 	-rm gpuskeintest
 
-.PHONY: clean
+.PHONY: clean run
