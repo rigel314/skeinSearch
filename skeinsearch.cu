@@ -18,46 +18,46 @@
 #define GPU
 #include "threefish.c"
 
+struct threadBestResult
+{
+	int min;
+	void* addr;
+};
+
 __global__
-void search(uint8_t* rands, int* ans)
+void search(uint8_t* rands, struct threadBestResult* ans)
 {
 	const uint64_t target[16] = {0x8082a05f5fa94d5b,0xc818f444df7998fc,0x7d75b724a42bf1f9,0x4f4c0daefbbd2be0,0x04fec50cc81793df,0x97f26c46739042c6,0xf6d2dd9959c2b806,0x877b97cc75440d54,0x8f9bf123e07b75f4,0x88b7862872d73540,0xf99ca716e96d8269,0x247d34d49cc74cc9,0x73a590233eaa67b5,0x4066675e8aa473a3,0xe7c5e19701c79cc7,0xb65818ca53fb02f9};
 	uint64_t hash[16];
 
-	int min = 1024;
-	// int len = BYpH;
-	// int offset = 0;
+	int minVal = 1024;
+	int minIdx = 0;
+	int idx = blockIdx.x*TpB+threadIdx.x;
 
 	for(int i = 0; i < HpT; i++)
 	{
-		// for(int h = BYpH; h > minBYpH; h--)
-		// {
-		// 	for(int o = 0; h+o <= BYpH; o++)
-		// 	{
-				// skeinhash1024x1024(rands+blockIdx.x*TpB*HpT*BYpH+threadIdx.x*HpT*BYpH+i*BYpH + o, h, hash);
-				skeinhash1024x1024(rands+blockIdx.x*TpB*HpT*BYpH+threadIdx.x*HpT*BYpH+i*BYpH, BYpH, hash);
-				int c = 0;
-				for (int j = 0; j < Nw; j++)
-				{
-					uint64_t tmp = target[j] ^ hash[j];
-					for (int k = 0; k < 64; k++)
-					{
-						if(tmp & 1)
-							c++;
-						tmp >>= 1;
-					}
-				}
-				if(c < min)
-				{
-					min = c;
-					// len = h;
-					// offset = o;
-				}
-		// 	}
-		// }
+		skeinhash1024x1024(rands+blockIdx.x*TpB*HpT*BYpH+threadIdx.x*HpT*BYpH+i*BYpH, BYpH, hash);
+
+		int c = 0;
+		for (int j = 0; j < Nw; j++)
+		{
+			uint64_t tmp = target[j] ^ hash[j];
+			for (int k = 0; k < 64; k++)
+			{
+				if(tmp & 1)
+					c++;
+				tmp >>= 1;
+			}
+		}
+		if(c < minVal)
+		{
+			minVal = c;
+			minIdx = i;
+		}
 	}
 
-	ans[blockIdx.x*TpB+threadIdx.x] = min; // | (len << 11) | (offset << 21);
+	ans[idx].min = minVal;
+	ans[idx].addr = rands+blockIdx.x*TpB*HpT*BYpH+threadIdx.x*HpT*BYpH+minIdx*BYpH;
 }
 
 __global__
@@ -82,54 +82,49 @@ void printfLog(char* fmt, ...);
 int main()
 {
 	// uint8_t* rands;
-	int* answers;
+	struct threadBestResult* answers;
 	uint8_t* cuRands;
-	int* cuAns;
+	struct threadBestResult* cuAns;
 	curandStatus_t s;
 
 	// Asserts on constants
 	assert(BYpH%sizeof(int) == 0); // cuRand generator makes ints
-	assert((BLOCKS*TpB)%2 == 0); //
 
-	// rands = (uint8_t*) malloc(TpB*HpT*BYpH); assert(rands != NULL);
-	answers = (int*) malloc(BLOCKS*TpB*sizeof(int)); assert(answers != NULL);
+	answers = (struct threadBestResult*) malloc(BLOCKS*TpB*sizeof(struct threadBestResult)); assert(answers != NULL);
 
+	// The default is to spin the CPU while waiting in cudaDeviceSynchronize() (for synchronous CUDA kernel calls)
+	// Spin loops are bullshit, so this tells it to sleep instead.
+	// Also, device flags have to be set before any other CUDA calls.
+	// I should probably care about using events, but I won't: https://devtalk.nvidia.com/default/topic/755859/cpu-core-is-busy-while-gpu-runs-its-kernel/
 	cudaSetDeviceFlags(cudaDeviceScheduleBlockingSync); assert(cudaGetLastError() == cudaSuccess);
 
+	// allocate everything.
 	cudaMalloc((void**)&cuRands, BLOCKS*TpB*HpT*BYpH); assert(cudaGetLastError() == cudaSuccess);
-	cudaMalloc((void**)&cuAns, BLOCKS*TpB*sizeof(int)); assert(cudaGetLastError() == cudaSuccess);
-	cudaMemset(cuAns, 0, BLOCKS*TpB*sizeof(int)); assert(cudaGetLastError() == cudaSuccess);
-
-	// printfLog("cuRands size: %d", BLOCKS*TpB*HpT*BYpH);
-	// printfLog("rands size: %d", TpB*HpT*BYpH);
+	cudaMalloc((void**)&cuAns, BLOCKS*TpB*sizeof(struct threadBestResult)); assert(cudaGetLastError() == cudaSuccess);
 
 	FILE* fp = fopen("/dev/urandom", "r");
 	uint64_t seed;
 	int ret = fread(&seed, sizeof(uint64_t), 1, fp);
+	fclose(fp);
 
 	printLog((char*)"generating/transferring random data for computation");
 
+	// All of the cuRand stuff.
 	curandGenerator_t gen;
 	s = curandCreateGenerator(&gen, CURAND_RNG_PSEUDO_XORWOW); assert(s == CURAND_STATUS_SUCCESS);
 	s = curandSetPseudoRandomGeneratorSeed(gen,seed); assert(s == CURAND_STATUS_SUCCESS);
 	s = curandGenerate(gen, (unsigned int*) cuRands, BYpH/4*HpT*TpB*BLOCKS); assert(s == CURAND_STATUS_SUCCESS);
 	cudaDeviceSynchronize(); assert(cudaGetLastError() == cudaSuccess);
 	s = curandDestroyGenerator(gen); assert(s == CURAND_STATUS_SUCCESS);
-
-	// for(int i = 0; i < BLOCKS; i++)
-	// {
-	// 	int ret = fread(rands, BYpH, TpB*HpT, fp);
-	// 	cudaMemcpy(cuRands+i*TpB*HpT*BYpH, rands, TpB*HpT*BYpH, cudaMemcpyHostToDevice); assert(cudaGetLastError() == cudaSuccess);
-	// 	printfLog("% 6.2f%% complete", (double)i/(double)BLOCKS*100.0);
-	// }
-	fclose(fp);
 	
 	printLog((char*)"starting search");
 	search<<<BLOCKS, TpB>>>(cuRands, cuAns); assert(cudaGetLastError() == cudaSuccess);
+	// Wait for kernel to finish.
 	cudaDeviceSynchronize(); assert(cudaGetLastError() == cudaSuccess);
 	printLog((char*)"search finished");
 
-	cudaMemcpy(answers, cuAns, BLOCKS*TpB*sizeof(int), cudaMemcpyDeviceToHost); assert(cudaGetLastError() == cudaSuccess);
+	// get the results from all threads
+	cudaMemcpy(answers, cuAns, BLOCKS*TpB*sizeof(struct threadBestResult), cudaMemcpyDeviceToHost); assert(cudaGetLastError() == cudaSuccess);
 	cudaFree(cuAns); assert(cudaGetLastError() == cudaSuccess);
 
 	printLog((char*)"finding best match");
@@ -137,31 +132,25 @@ int main()
 	int lowestI = -1;
 	for(int i = 0; i < BLOCKS*TpB; i++)
 	{
-		// if(answers[i] & (0x7FF) < min)
-		// {
-		// 	min = answers[i] & (0x7FF);
-		// 	lowestI = i;
-		// }
-		if(answers[i] < min)
+		if(answers[i].min < min)
 		{
-			min = answers[i];
+			min = answers[i].min;
 			lowestI = i;
 		}
 	}
 
 	uint8_t bestMatch[BYpH];
-	cudaMemcpy(&bestMatch, cuRands+lowestI*BYpH, BYpH, cudaMemcpyDeviceToHost); assert(cudaGetLastError() == cudaSuccess);
-	printfLog((char*)"best match(%d incorrect bits):", min);
-	// for(int i = ((answers[lowestI] & (0x7FE00000)) >> 21); i < ((answers[lowestI] & (0x1FF800)) >> 11); i++)
-	// {
-	// 	printf("%02x ", bestMatch[i]);
-	// }
+	cudaMemcpy(&bestMatch, answers[lowestI].addr, BYpH, cudaMemcpyDeviceToHost); assert(cudaGetLastError() == cudaSuccess);
+	printfLog((char*)"best match(%d incorrect bits) (hash index %d) (pointer offset %p):", min, lowestI, (uint8_t*)answers[lowestI].addr - cuRands);
 	for(int i = 0; i < BYpH; i++)
 	{
 		printf("%02x ", bestMatch[i]);
 	}
 	printf("\n");
+	// printMsg(answers[lowestI].hash);
+
 	cudaFree(cuRands); assert(cudaGetLastError() == cudaSuccess);
+	free(answers);
 
 	return EXIT_SUCCESS;
 }
